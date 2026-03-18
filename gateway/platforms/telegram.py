@@ -405,15 +405,29 @@ class TelegramAdapter(BasePlatformAdapter):
         """Edit a previously sent Telegram message."""
         if not self._bot:
             return SendResult(success=False, error="Not connected")
-        try:
+      try:
             formatted = self.format_message(content)
-            try:
+            # Karakter limitini kontrol ediyoruz (4000 güvenli limandır)
+            if len(formatted) > 4000:
+                # Mevcut mesajı limitte kes ve "..." ekle
+                truncated_text = formatted[:4000] + "..."
                 await self._bot.edit_message_text(
                     chat_id=int(chat_id),
                     message_id=int(message_id),
-                    text=formatted,
+                    text=truncated_text,
                     parse_mode=ParseMode.MARKDOWN_V2,
                 )
+                # Kalan kısmı yeni mesaj olarak başlat (Geriye kalan karakterleri gönderir)
+                remaining_text = formatted[4000:]
+                return await self.send(chat_id, remaining_text)
+
+            # Limit altındaysa normal işleme devam et
+            await self._bot.edit_message_text(
+                chat_id=int(chat_id),
+                message_id=int(message_id),
+                text=formatted,
+                parse_mode=ParseMode.MARKDOWN_V2,
+            )
             except Exception as fmt_err:
                 # "Message is not modified" is a no-op, not an error
                 if "not modified" in str(fmt_err).lower():
