@@ -5089,7 +5089,7 @@ class AIAgent:
                 and self._memory_store):
             self._turns_since_memory += 1
             if self._turns_since_memory >= self._memory_nudge_interval:
-                user_message += (
+                _memory_nudge = (
                     "\n\n[System: You've had several exchanges. Consider: "
                     "has the user shared preferences, corrected you, or revealed "
                     "something about their workflow worth remembering for future sessions?]"
@@ -5101,7 +5101,7 @@ class AIAgent:
         if (self._skill_nudge_interval > 0
                 and self._iters_since_skill >= self._skill_nudge_interval
                 and "skill_manage" in self.valid_tool_names):
-            user_message += (
+            _skill_nudge = (
                 "\n\n[System: The previous task involved many tool calls. "
                 "Save the approach as a skill if it's reusable, or update "
                 "any existing skill you used if it was wrong or incomplete.]"
@@ -5129,7 +5129,8 @@ class AIAgent:
             except Exception as e:
                 logger.debug("Honcho prefetch failed (non-fatal): %s", e)
 
-        # Add user message
+        # Add user message — nudges are injected at API-call time only (ephemeral)
+        _nudge_suffix = getattr(self, '_memory_nudge', '') + getattr(self, '_skill_nudge', '')
         user_msg = {"role": "user", "content": user_message}
         messages.append(user_msg)
         current_turn_user_idx = len(messages) - 1
@@ -5287,10 +5288,13 @@ class AIAgent:
             for idx, msg in enumerate(messages):
                 api_msg = msg.copy()
 
-                if idx == current_turn_user_idx and msg.get("role") == "user" and self._honcho_turn_context:
-                    api_msg["content"] = _inject_honcho_turn_context(
-                        api_msg.get("content", ""), self._honcho_turn_context
-                    )
+                if idx == current_turn_user_idx and msg.get("role") == "user":
+                    if self._honcho_turn_context:
+                        api_msg["content"] = _inject_honcho_turn_context(
+                            api_msg.get("content", ""), self._honcho_turn_context
+                        )
+                    if _nudge_suffix:
+                        api_msg["content"] = str(api_msg.get("content", "")) + _nudge_suffix
 
                 # For ALL assistant messages, pass reasoning back to the API
                 # This ensures multi-turn reasoning context is preserved
