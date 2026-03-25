@@ -15,6 +15,7 @@ from hermes_cli.auth import (
     resolve_codex_runtime_credentials,
     resolve_api_key_provider_credentials,
     resolve_external_process_provider_credentials,
+    has_usable_secret,
 )
 from hermes_cli.config import load_config
 from hermes_constants import OPENROUTER_BASE_URL
@@ -22,6 +23,18 @@ from hermes_constants import OPENROUTER_BASE_URL
 
 def _normalize_custom_provider_name(value: str) -> str:
     return value.strip().lower().replace(" ", "-")
+
+
+def _detect_api_mode_for_url(base_url: str) -> Optional[str]:
+    """Auto-detect api_mode from the resolved base URL.
+
+    Direct api.openai.com endpoints need the Responses API for GPT-5.x
+    tool calls with reasoning (chat/completions returns 400).
+    """
+    normalized = (base_url or "").strip().lower().rstrip("/")
+    if "api.openai.com" in normalized and "openrouter" not in normalized:
+        return "codex_responses"
+    return None
 
 
 def _auto_detect_local_model(base_url: str) -> str:
@@ -171,16 +184,19 @@ def _resolve_named_custom_runtime(
     if not base_url:
         return None
 
-    api_key = (
-        (explicit_api_key or "").strip()
-        or custom_provider.get("api_key", "")
-        or os.getenv("OPENAI_API_KEY", "").strip()
-        or os.getenv("OPENROUTER_API_KEY", "").strip()
-    )
+    api_key_candidates = [
+        (explicit_api_key or "").strip(),
+        str(custom_provider.get("api_key", "") or "").strip(),
+        os.getenv("OPENAI_API_KEY", "").strip(),
+        os.getenv("OPENROUTER_API_KEY", "").strip(),
+    ]
+    api_key = next((candidate for candidate in api_key_candidates if has_usable_secret(candidate)), "")
 
     return {
-        "provider": "openrouter",
-        "api_mode": custom_provider.get("api_mode", "chat_completions"),
+        "provider": "custom",
+        "api_mode": custom_provider.get("api_mode")
+        or _detect_api_mode_for_url(base_url)
+        or "chat_completions",
         "base_url": base_url,
         "api_key": api_key,
         "source": f"custom_provider:{custom_provider.get('name', requested_provider)}",
@@ -228,24 +244,191 @@ def _resolve_openrouter_runtime(
 
     _is_openrouter_url = "openrouter.ai" in base_url
     if _is_openrouter_url:
-        api_key = (
-            explicit_api_key
-            or os.getenv("OPENROUTER_API_KEY")
-            or os.getenv("OPENAI_API_KEY")
-            or ""
-        )
+        api_key_candidates = [
+            explicit_api_key,
+            os.getenv("OPENROUTER_API_KEY"),
+            os.getenv("OPENAI_API_KEY"),
+        ]
     else:
-        api_key = (
-            explicit_api_key
-            or (cfg_api_key if use_config_base_url else "")
-            or os.getenv("OPENAI_API_KEY")
-            or os.getenv("OPENROUTER_API_KEY")
-            or ""
-        )
+        # Custom endpoint: use api_key from config when using config base_url (#1760).
+        api_key_candidates = [
+            explicit_api_key,
+            (cfg_api_key if use_config_base_url else ""),
+            os.getenv("OPENAI_API_KEY"),
+            os.getenv("OPENROUTER_API_KEY"),
+        ]
+
+    api_key = next(
+        (str(candidate or "").strip() for candidate in api_key_candidates if has_usable_secret(candidate)),
+        "",
+    )
 
     source = "explicit" if (explicit_api_key or explicit_base_url) else "env/config"
 
+    # When "custom" was explicitly requested, preserve that as the provider
+    # name instead of silently relabeling to "openrouter" (#2562).
+    # Also provide a placeholder API key for local servers that don't require
+    # authentication — the OpenAI SDK requires a non-empty api_key string.
+    effective_provider = "custom" if requested_norm == "custom" else "openrouter"
+    if effective_provider == "custom" and not api_key and not _is_openrouter_url:
+        api_key = "no-key-required"
+
     return {
-        "provider": "openrouter",
-        "api_mode": _parse_api_mode(model_cfg.get("api_mode")) or "chat_completions",
-        "base_url": base
+        "provider": effective_provider,
+        "api_mode": _parse_api_mode(model_cfg.get("api_mode"))
+        or _detect_api_mode_for_url(base_url)
+        or "chat_completions",
+        "base_url": base_url,
+        "api_key": api_key,
+        "source": source,
+    }
+
+
+def resolve_runtime_provider(
+    *,
+    requested: Optional[str] = None,
+    explicit_api_key: Optional[str] = None,
+    explicit_base_url: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Resolve runtime provider credentials for agent execution."""
+    requested_provider = resolve_requested_provider(requested)
+
+    custom_runtime = _resolve_named_custom_runtime(
+        requested_provider=requested_provider,
+        explicit_api_key=explicit_api_key,
+        explicit_base_url=explicit_base_url,
+    )
+    if custom_runtime:
+        custom_runtime["requested_provider"] = requested_provider
+        return custom_runtime
+
+    provider = resolve_provider(
+        requested_provider,
+        explicit_api_key=explicit_api_key,
+        explicit_base_url=explicit_base_url,
+    )
+
+    if provider == "nous":
+        creds = resolve_nous_runtime_credentials(
+            min_key_ttl_seconds=max(60, int(os.getenv("HERMES_NOUS_MIN_KEY_TTL_SECONDS", "1800"))),
+            timeout_seconds=float(os.getenv("HERMES_NOUS_TIMEOUT_SECONDS", "15")),
+        )
+        return {
+            "provider": "nous",
+            "api_mode": "chat_completions",
+            "base_url": creds.get("base_url", "").rstrip("/"),
+            "api_key": creds.get("api_key", ""),
+            "source": creds.get("source", "portal"),
+            "expires_at": creds.get("expires_at"),
+            "requested_provider": requested_provider,
+        }
+
+    if provider == "openai-codex":
+        creds = resolve_codex_runtime_credentials()
+        return {
+            "provider": "openai-codex",
+            "api_mode": "codex_responses",
+            "base_url": creds.get("base_url", "").rstrip("/"),
+            "api_key": creds.get("api_key", ""),
+            "source": creds.get("source", "hermes-auth-store"),
+            "last_refresh": creds.get("last_refresh"),
+            "requested_provider": requested_provider,
+        }
+
+    if provider == "copilot-acp":
+        creds = resolve_external_process_provider_credentials(provider)
+        return {
+            "provider": "copilot-acp",
+            "api_mode": "chat_completions",
+            "base_url": creds.get("base_url", "").rstrip("/"),
+            "api_key": creds.get("api_key", ""),
+            "command": creds.get("command", ""),
+            "args": list(creds.get("args") or []),
+            "source": creds.get("source", "process"),
+            "requested_provider": requested_provider,
+        }
+
+    # Anthropic (native Messages API)
+    if provider == "anthropic":
+        from agent.anthropic_adapter import resolve_anthropic_token
+        token = resolve_anthropic_token()
+        if not token:
+            raise AuthError(
+                "No Anthropic credentials found. Set ANTHROPIC_TOKEN or ANTHROPIC_API_KEY, "
+                "run 'claude setup-token', or authenticate with 'claude /login'."
+            )
+        model_cfg = _get_model_config()
+        cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
+        cfg_base_url = ""
+        if cfg_provider == "anthropic":
+            cfg_base_url = (model_cfg.get("base_url") or "").strip().rstrip("/")
+        base_url = cfg_base_url or "https://api.anthropic.com"
+        return {
+            "provider": "anthropic",
+            "api_mode": "anthropic_messages",
+            "base_url": base_url,
+            "api_key": token,
+            "source": "env",
+            "requested_provider": requested_provider,
+        }
+
+    # Alibaba Cloud / DashScope (Düzeltildi)
+    if provider == "alibaba":
+        creds = resolve_api_key_provider_credentials(provider)
+        model_cfg = _get_model_config()
+        base_url = (model_cfg.get("base_url") or "").strip().rstrip("/") or creds.get("base_url", "").rstrip("/") or "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+        
+        api_mode = "anthropic_messages"
+        if "compatible-mode" in base_url or "v1" in base_url:
+            api_mode = "chat_completions"
+            
+        return {
+            "provider": "alibaba",
+            "api_mode": api_mode,
+            "base_url": base_url,
+            "api_key": creds.get("api_key", ""),
+            "source": creds.get("source", "env"),
+            "requested_provider": requested_provider,
+        }
+
+    # API-key providers (z.ai/GLM, Kimi, MiniMax, MiniMax-CN)
+    pconfig = PROVIDER_REGISTRY.get(provider)
+    if pconfig and pconfig.auth_type == "api_key":
+        creds = resolve_api_key_provider_credentials(provider)
+        model_cfg = _get_model_config()
+        base_url = creds.get("base_url", "").rstrip("/")
+        api_mode = "chat_completions"
+        if provider == "copilot":
+            api_mode = _copilot_runtime_api_mode(model_cfg, creds.get("api_key", ""))
+        else:
+            configured_mode = _parse_api_mode(model_cfg.get("api_mode"))
+            if configured_mode:
+                api_mode = configured_mode
+            elif base_url.rstrip("/").endswith("/anthropic"):
+                api_mode = "anthropic_messages"
+            elif provider in ("minimax", "minimax-cn"):
+                api_mode = "anthropic_messages"
+                if base_url.rstrip("/").endswith("/v1"):
+                    base_url = base_url.rstrip("/")[:-3] + "/anthropic"
+        return {
+            "provider": provider,
+            "api_mode": api_mode,
+            "base_url": base_url,
+            "api_key": creds.get("api_key", ""),
+            "source": creds.get("source", "env"),
+            "requested_provider": requested_provider,
+        }
+
+    runtime = _resolve_openrouter_runtime(
+        requested_provider=requested_provider,
+        explicit_api_key=explicit_api_key,
+        explicit_base_url=explicit_base_url,
+    )
+    runtime["requested_provider"] = requested_provider
+    return runtime
+
+
+def format_runtime_provider_error(error: Exception) -> str:
+    if isinstance(error, AuthError):
+        return format_auth_error(error)
+    return str(error)
