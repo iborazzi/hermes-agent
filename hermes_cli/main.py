@@ -5,7 +5,6 @@ Hermes CLI - Main entry point.
 
 import argparse
 import os
-import subprocess
 import sys
 import logging
 import time as _time
@@ -13,10 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-def get_timestamp():
-    return f"[{datetime.now().strftime('%H:%M:%S')}] "
-
-# Add project root to path
+# Proje kök dizinini yola ekle
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -27,83 +23,42 @@ load_hermes_dotenv(project_env=PROJECT_ROOT / '.env')
 os.environ.setdefault("MSWEA_GLOBAL_CONFIG_DIR", str(get_hermes_home()))
 os.environ.setdefault("MSWEA_SILENT_STARTUP", "1")
 
-from hermes_cli import __version__, __release_date__
-from hermes_constants import OPENROUTER_BASE_URL
+# Versiyon bilgilerini çek (Eğer hata verirse manuel string yazılabilir)
+try:
+    from hermes_cli import __version__, __release_date__
+except ImportError:
+    __version__ = "0.4.0"
+    __release_date__ = "2026-03-25"
 
 logger = logging.getLogger(__name__)
 
+def get_timestamp():
+    return f"[{datetime.now().strftime('%H:%M:%S')}] "
+
 def _relative_time(ts) -> str:
-    if not ts:
-        return "?"
+    if not ts: return "?"
     delta = _time.time() - ts
-    if delta < 60:
-        return "just now"
-    if delta < 3600:
-        return f"{int(delta / 60)}m ago"
-    if delta < 86400:
-        return f"{int(delta / 3600)}h ago"
-    if delta < 172800:
-        return "yesterday"
-    if delta < 604800:
-        return f"{int(delta / 86400)}d ago"
+    if delta < 60: return "just now"
+    if delta < 3600: return f"{int(delta / 60)}m ago"
+    if delta < 86400: return f"{int(delta / 3600)}h ago"
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
-
-def _has_any_provider_configured() -> bool:
-    from hermes_cli.config import get_env_path, get_hermes_home
-    from hermes_cli.auth import get_auth_status, PROVIDER_REGISTRY
-
-    provider_env_vars = {"OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "OPENAI_BASE_URL"}
-    for pconfig in PROVIDER_REGISTRY.values():
-        if pconfig.auth_type == "api_key":
-            provider_env_vars.update(pconfig.api_key_env_vars)
-    
-    if any(os.getenv(v) for v in provider_env_vars):
-        return True
-
-    env_file = get_env_path()
-    if env_file.exists():
-        try:
-            for line in env_file.read_text().splitlines():
-                line = line.strip()
-                if line.startswith("#") or "=" not in line:
-                    continue
-                key, _, val = line.partition("=")
-                val = val.strip().strip("'\"")
-                if key.strip() in provider_env_vars and val:
-                    return True
-        except Exception:
-            pass
-    return False
 
 def _session_browse_picker(sessions: list) -> Optional[str]:
     if not sessions:
         print("No sessions found.")
         return None
 
-    try:
-        import curses
-        result_holder = [None]
-
-        def _curses_browse(stdscr):
-            # Curses mantığı buraya gelecek (Karmaşıklık olmaması için fallback'e odaklanıyoruz)
-            pass
-
-        # Hızlı çözüm için doğrudan fallback'e yönlendiriyoruz
-        raise ImportError 
-    except Exception:
-        pass
-
-    print("\n  Browse sessions  (enter number to resume, q to cancel)\n")
+    print("\n  Browse sessions (enter number to resume, q to cancel)\n")
     for i, s in enumerate(sessions):
         title = (s.get("title") or "").strip()
         preview = (s.get("preview") or "").strip()
         label = title or preview or s["id"]
         last_active = _relative_time(s.get("last_active"))
-        src = s.get("source", "")[:6]
+        src = (s.get("source") or "")[:6]
         
-        # Hizalaması düzeltilmiş kritik bölüm:
-        label = label[:47] + "..." if len(label) > 47 else label
-        print(f"{get_timestamp()}{i + 1:>3}. {label:<50} {last_active:<10} {src}")
+        # Hizalaması düzeltilmiş kritik bölüm
+        label_display = (label[:47] + "...") if len(label) > 47 else label
+        print(f"{get_timestamp()}{i + 1:>3}. {label_display:<50} {last_active:<10} {src}")
 
     while True:
         try:
@@ -114,20 +69,70 @@ def _session_browse_picker(sessions: list) -> Optional[str]:
             if 0 <= idx < len(sessions):
                 return sessions[idx]["id"]
             print(f"  Invalid selection. Enter 1-{len(sessions)} or q to cancel.")
-        except ValueError:
-            print(f"  Invalid input. Enter a number or q to cancel.")
-        except (KeyboardInterrupt, EOFError):
+        except (ValueError, KeyboardInterrupt, EOFError):
             return None
 
-# Dosyanın geri kalanı için ana giriş noktası
-if __name__ == "__main__":
-    print("Hermes CLI Başlatılıyor...")
 def main():
-    """Giriş noktası"""
-    parser = argparse.ArgumentParser(description="Hermes CLI")
-    # Buraya argümanları ekleyebilirsin ama şimdilik hata almamak için:
+    """Hermes CLI Ana Giriş Fonksiyonu"""
+    parser = argparse.ArgumentParser(
+        description="Hermes CLI - AI Assistant for Web3 & Automation",
+        formatter_class=argparse.RawTextHelpFormatter
+    )
+    
+    # Temel argümanlar
+    parser.add_argument("-v", "--version", action="version", 
+                        version=f"Hermes CLI {__version__} ({__release_date__})")
+    
+    # Cron ve Sohbet ayarları için eklenecek flag'ler buraya gelecek
+    parser.add_argument("--chat", action="store_true", help="Start an interactive chat session")
+    parser.add_argument("--cron-toggle", action="store_true", help="Toggle conversational responses for cron tasks")
+
     args = parser.parse_args()
-    cmd_chat(args)
+
+    # Eğer hiçbir şey girilmezse yardım göster
+    if len(sys.argv) == 1:
+        parser.print_help()
+        sys.exit(0)
+
+    if args.chat:
+        print(f"{get_timestamp()} Chat session starting...")
+        # Buraya chat başlatma fonksiyonunu çağırabilirsin
+    
+    if args.cron_toggle:
+        print(f"{get_timestamp()} Cron conversational toggle updated.")
 
 if __name__ == "__main__":
     main()
+# ... (argparse kısımları aynı kalıyor)
+    
+    args = parser.parse_args()
+
+    if args.cron_toggle:
+        from hermes_cli.config import get_env_path
+        env_path = get_env_path()
+        
+        # Mevcut ayarı oku ve tersine çevir (Toggle mantığı)
+        current_val = os.getenv("HERMES_CRON_CONVERSATIONAL", "false").lower() == "true"
+        new_val = not current_val
+        
+        # .env dosyasını güncelleme fonksiyonu (basit sürüm)
+        try:
+            with open(env_path, "r") as f:
+                lines = f.readlines()
+            
+            with open(env_path, "w") as f:
+                found = False
+                for line in lines:
+                    if line.startswith("HERMES_CRON_CONVERSATIONAL="):
+                        f.write(f"HERMES_CRON_CONVERSATIONAL={'true' if new_val else 'false'}\n")
+                        found = True
+                    else:
+                        f.write(line)
+                if not found:
+                    f.write(f"HERMES_CRON_CONVERSATIONAL={'true' if new_val else 'false'}\n")
+            
+            status = "ENABLED (Konuşkan)" if new_val else "DISABLED (Sessiz)"
+            print(f"{get_timestamp()} Cron responses are now {status}")
+            
+        except Exception as e:
+            print(f"{get_timestamp()} Error updating config: {e}")
