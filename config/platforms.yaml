@@ -1,0 +1,4 @@
+platforms:
+  slack:
+    extra:
+      reply_in_thread: false

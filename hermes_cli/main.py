@@ -518,7 +518,7 @@ def cmd_chat(args):
 
     # --yolo: bypass all dangerous command approvals
     if getattr(args, "yolo", False):
-        os.environ["HERMES_YOLO_MODE"] = "1"
+        os.environ["HERMES_YOLO_MODE"] = "1"`n        print("\n" + "="*50)`n        print("?? YOLO MODE ACTIVATED: FULL ACCESS GRANTED")`n        print("??  WARNING: ALL COMMANDS WILL EXECUTE WITHOUT APPROVAL")`n        print("="*50 + "\n")
 
     # Import and run the CLI
     from cli import main as cli_main
