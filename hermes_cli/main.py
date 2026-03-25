@@ -16,14 +16,17 @@ from typing import Optional
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from hermes_cli.config import get_hermes_home
+from hermes_cli.config import get_hermes_home, get_env_path
 from hermes_cli.env_loader import load_hermes_dotenv
-load_hermes_dotenv(project_env=PROJECT_ROOT / '.env')
 
+# Yapılandırma dizinlerini ayarla
 os.environ.setdefault("MSWEA_GLOBAL_CONFIG_DIR", str(get_hermes_home()))
 os.environ.setdefault("MSWEA_SILENT_STARTUP", "1")
 
-# Versiyon bilgilerini çek (Eğer hata verirse manuel string yazılabilir)
+# .env yükle
+load_hermes_dotenv(project_env=PROJECT_ROOT / '.env')
+
+# Versiyon bilgileri
 try:
     from hermes_cli import __version__, __release_date__
 except ImportError:
@@ -35,43 +38,6 @@ logger = logging.getLogger(__name__)
 def get_timestamp():
     return f"[{datetime.now().strftime('%H:%M:%S')}] "
 
-def _relative_time(ts) -> str:
-    if not ts: return "?"
-    delta = _time.time() - ts
-    if delta < 60: return "just now"
-    if delta < 3600: return f"{int(delta / 60)}m ago"
-    if delta < 86400: return f"{int(delta / 3600)}h ago"
-    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
-
-def _session_browse_picker(sessions: list) -> Optional[str]:
-    if not sessions:
-        print("No sessions found.")
-        return None
-
-    print("\n  Browse sessions (enter number to resume, q to cancel)\n")
-    for i, s in enumerate(sessions):
-        title = (s.get("title") or "").strip()
-        preview = (s.get("preview") or "").strip()
-        label = title or preview or s["id"]
-        last_active = _relative_time(s.get("last_active"))
-        src = (s.get("source") or "")[:6]
-        
-        # Hizalaması düzeltilmiş kritik bölüm
-        label_display = (label[:47] + "...") if len(label) > 47 else label
-        print(f"{get_timestamp()}{i + 1:>3}. {label_display:<50} {last_active:<10} {src}")
-
-    while True:
-        try:
-            val = input(f"\n  Select [1-{len(sessions)}]: ").strip()
-            if not val or val.lower() in ("q", "quit", "exit"):
-                return None
-            idx = int(val) - 1
-            if 0 <= idx < len(sessions):
-                return sessions[idx]["id"]
-            print(f"  Invalid selection. Enter 1-{len(sessions)} or q to cancel.")
-        except (ValueError, KeyboardInterrupt, EOFError):
-            return None
-
 def main():
     """Hermes CLI Ana Giriş Fonksiyonu"""
     parser = argparse.ArgumentParser(
@@ -79,60 +45,48 @@ def main():
         formatter_class=argparse.RawTextHelpFormatter
     )
     
-    # Temel argümanlar
     parser.add_argument("-v", "--version", action="version", 
                         version=f"Hermes CLI {__version__} ({__release_date__})")
     
-    # Cron ve Sohbet ayarları için eklenecek flag'ler buraya gelecek
     parser.add_argument("--chat", action="store_true", help="Start an interactive chat session")
     parser.add_argument("--cron-toggle", action="store_true", help="Toggle conversational responses for cron tasks")
 
     args = parser.parse_args()
 
-    # Eğer hiçbir şey girilmezse yardım göster
     if len(sys.argv) == 1:
         parser.print_help()
         sys.exit(0)
 
     if args.chat:
         print(f"{get_timestamp()} Chat session starting...")
-        # Buraya chat başlatma fonksiyonunu çağırabilirsin
+        # Buraya chat modülü import edilip çağrılabilir.
     
     if args.cron_toggle:
-        print(f"{get_timestamp()} Cron conversational toggle updated.")
+        env_path = Path(get_env_path())
+        
+        # Klasör ve dosya güvenliği
+        env_path.parent.mkdir(parents=True, exist_ok=True)
+        if not env_path.exists():
+            env_path.touch()
+
+        # Dosyayı oku ve temizle (Boş satırları ve boşlukları atla)
+        content = env_path.read_text(encoding="utf-8")
+        lines = [line.strip() for line in content.splitlines() if line.strip()]
+        
+        # Mevcut ayarı kontrol et (True mu?)
+        is_currently_true = any(line == "HERMES_CRON_CONVERSATIONAL=true" for line in lines)
+        new_val = not is_currently_true
+        
+        # Eskileri temizle ve yenisini ekle (Duplication engelleme)
+        new_lines = [line for line in lines if not line.startswith("HERMES_CRON_CONVERSATIONAL=")]
+        new_lines.append(f"HERMES_CRON_CONVERSATIONAL={'true' if new_val else 'false'}")
+
+        # Dosyaya tertemiz yaz
+        env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+        
+        status = "ENABLED (Konuşkan)" if new_val else "DISABLED (Sessiz)"
+        print(f"{get_timestamp()} Cron responses are now {status}")
+        print(f"{get_timestamp()} Config updated at: {env_path}")
 
 if __name__ == "__main__":
     main()
-# ... (argparse kısımları aynı kalıyor)
-    
-    args = parser.parse_args()
-
-    if args.cron_toggle:
-        from hermes_cli.config import get_env_path
-        env_path = get_env_path()
-        
-        # Mevcut ayarı oku ve tersine çevir (Toggle mantığı)
-        current_val = os.getenv("HERMES_CRON_CONVERSATIONAL", "false").lower() == "true"
-        new_val = not current_val
-        
-        # .env dosyasını güncelleme fonksiyonu (basit sürüm)
-        try:
-            with open(env_path, "r") as f:
-                lines = f.readlines()
-            
-            with open(env_path, "w") as f:
-                found = False
-                for line in lines:
-                    if line.startswith("HERMES_CRON_CONVERSATIONAL="):
-                        f.write(f"HERMES_CRON_CONVERSATIONAL={'true' if new_val else 'false'}\n")
-                        found = True
-                    else:
-                        f.write(line)
-                if not found:
-                    f.write(f"HERMES_CRON_CONVERSATIONAL={'true' if new_val else 'false'}\n")
-            
-            status = "ENABLED (Konuşkan)" if new_val else "DISABLED (Sessiz)"
-            print(f"{get_timestamp()} Cron responses are now {status}")
-            
-        except Exception as e:
-            print(f"{get_timestamp()} Error updating config: {e}")
