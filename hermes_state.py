@@ -26,7 +26,7 @@ from typing import Dict, Any, List, Optional
 
 DEFAULT_DB_PATH = Path(os.getenv("HERMES_HOME", Path.home() / ".hermes")) / "state.db"
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -73,7 +73,10 @@ CREATE TABLE IF NOT EXISTS messages (
     tool_name TEXT,
     timestamp REAL NOT NULL,
     token_count INTEGER,
-    finish_reason TEXT
+    finish_reason TEXT,
+    reasoning TEXT,
+    reasoning_details TEXT,
+    codex_reasoning_items TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
@@ -181,10 +184,33 @@ class SessionDB:
                 ]
                 for name, column_type in new_columns:
                     try:
-                        cursor.execute(f"ALTER TABLE sessions ADD COLUMN {name} {column_type}")
+                        # name and column_type come from the hardcoded tuple above,
+                        # not user input. Double-quote identifier escaping is applied
+                        # as defense-in-depth; SQLite DDL cannot be parameterized.
+                        safe_name = name.replace('"', '""')
+                        cursor.execute(f'ALTER TABLE sessions ADD COLUMN "{safe_name}" {column_type}')
                     except sqlite3.OperationalError:
                         pass
                 cursor.execute("UPDATE schema_version SET version = 5")
+            if current_version < 6:
+                # v6: add reasoning columns to messages table — preserves assistant
+                # reasoning text and structured reasoning_details across gateway
+                # session turns.  Without these, reasoning chains are lost on
+                # session reload, breaking multi-turn reasoning continuity for
+                # providers that replay reasoning (OpenRouter, OpenAI, Nous).
+                for col_name, col_type in [
+                    ("reasoning", "TEXT"),
+                    ("reasoning_details", "TEXT"),
+                    ("codex_reasoning_items", "TEXT"),
+                ]:
+                    try:
+                        safe = col_name.replace('"', '""')
+                        cursor.execute(
+                            f'ALTER TABLE messages ADD COLUMN "{safe}" {col_type}'
+                        )
+                    except sqlite3.OperationalError:
+                        pass  # Column already exists
+                cursor.execute("UPDATE schema_version SET version = 6")
 
         # Unique title index — always ensure it exists (safe to run after migrations
         # since the title column is guaranteed to exist at this point)
@@ -583,6 +609,9 @@ class SessionDB:
         tool_call_id: str = None,
         token_count: int = None,
         finish_reason: str = None,
+        reasoning: str = None,
+        reasoning_details: Any = None,
+        codex_reasoning_items: Any = None,
     ) -> int:
         """
         Append a message to a session. Returns the message row ID.
@@ -591,10 +620,20 @@ class SessionDB:
         if role is 'tool' or tool_calls is present).
         """
         with self._lock:
+            # Serialize structured fields to JSON for storage
+            reasoning_details_json = (
+                json.dumps(reasoning_details)
+                if reasoning_details else None
+            )
+            codex_items_json = (
+                json.dumps(codex_reasoning_items)
+                if codex_reasoning_items else None
+            )
             cursor = self._conn.execute(
                 """INSERT INTO messages (session_id, role, content, tool_call_id,
-                   tool_calls, tool_name, timestamp, token_count, finish_reason)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   tool_calls, tool_name, timestamp, token_count, finish_reason,
+                   reasoning, reasoning_details, codex_reasoning_items)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     role,
@@ -605,6 +644,9 @@ class SessionDB:
                     time.time(),
                     token_count,
                     finish_reason,
+                    reasoning,
+                    reasoning_details_json,
+                    codex_items_json,
                 ),
             )
             msg_id = cursor.lastrowid
@@ -656,7 +698,8 @@ class SessionDB:
         """
         with self._lock:
             cursor = self._conn.execute(
-                "SELECT role, content, tool_call_id, tool_calls, tool_name "
+                "SELECT role, content, tool_call_id, tool_calls, tool_name, "
+                "reasoning, reasoning_details, codex_reasoning_items "
                 "FROM messages WHERE session_id = ? ORDER BY timestamp, id",
                 (session_id,),
             )
@@ -673,6 +716,22 @@ class SessionDB:
                     msg["tool_calls"] = json.loads(row["tool_calls"])
                 except (json.JSONDecodeError, TypeError):
                     pass
+            # Restore reasoning fields on assistant messages so providers
+            # that replay reasoning (OpenRouter, OpenAI, Nous) receive
+            # coherent multi-turn reasoning context.
+            if row["role"] == "assistant":
+                if row["reasoning"]:
+                    msg["reasoning"] = row["reasoning"]
+                if row["reasoning_details"]:
+                    try:
+                        msg["reasoning_details"] = json.loads(row["reasoning_details"])
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                if row["codex_reasoning_items"]:
+                    try:
+                        msg["codex_reasoning_items"] = json.loads(row["codex_reasoning_items"])
+                    except (json.JSONDecodeError, TypeError):
+                        pass
             messages.append(msg)
         return messages
 
@@ -851,23 +910,25 @@ class SessionDB:
 
     def session_count(self, source: str = None) -> int:
         """Count sessions, optionally filtered by source."""
-        if source:
-            cursor = self._conn.execute(
-                "SELECT COUNT(*) FROM sessions WHERE source = ?", (source,)
-            )
-        else:
-            cursor = self._conn.execute("SELECT COUNT(*) FROM sessions")
-        return cursor.fetchone()[0]
+        with self._lock:
+            if source:
+                cursor = self._conn.execute(
+                    "SELECT COUNT(*) FROM sessions WHERE source = ?", (source,)
+                )
+            else:
+                cursor = self._conn.execute("SELECT COUNT(*) FROM sessions")
+            return cursor.fetchone()[0]
 
     def message_count(self, session_id: str = None) -> int:
         """Count messages, optionally for a specific session."""
-        if session_id:
-            cursor = self._conn.execute(
-                "SELECT COUNT(*) FROM messages WHERE session_id = ?", (session_id,)
-            )
-        else:
-            cursor = self._conn.execute("SELECT COUNT(*) FROM messages")
-        return cursor.fetchone()[0]
+        with self._lock:
+            if session_id:
+                cursor = self._conn.execute(
+                    "SELECT COUNT(*) FROM messages WHERE session_id = ?", (session_id,)
+                )
+            else:
+                cursor = self._conn.execute("SELECT COUNT(*) FROM messages")
+            return cursor.fetchone()[0]
 
     # =========================================================================
     # Export and cleanup
