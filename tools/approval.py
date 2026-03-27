@@ -13,6 +13,7 @@ import os
 import re
 import sys
 import threading
+import unicodedata
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,9 @@ DANGEROUS_PATTERNS = [
     (r'\bxargs\s+.*\brm\b', "xargs with rm"),
     (r'\bfind\b.*-exec\s+(/\S*/)?rm\b', "find -exec rm"),
     (r'\bfind\b.*-delete\b', "find -delete"),
+    # Gateway protection: never start gateway outside systemd management
+    (r'gateway\s+run\b.*(&\s*$|&\s*;|\bdisown\b|\bsetsid\b)', "start gateway outside systemd (use 'systemctl --user restart hermes-gateway')"),
+    (r'\bnohup\b.*gateway\s+run\b', "start gateway outside systemd (use 'systemctl --user restart hermes-gateway')"),
 ]
 
 
@@ -79,13 +83,31 @@ def _approval_key_aliases(pattern_key: str) -> set[str]:
 # Detection
 # =========================================================================
 
+def _normalize_command_for_detection(command: str) -> str:
+    """Normalize a command string before dangerous-pattern matching.
+
+    Strips ANSI escape sequences (full ECMA-48 via tools.ansi_strip),
+    null bytes, and normalizes Unicode fullwidth characters so that
+    obfuscation techniques cannot bypass the pattern-based detection.
+    """
+    from tools.ansi_strip import strip_ansi
+
+    # Strip all ANSI escape sequences (CSI, OSC, DCS, 8-bit C1, etc.)
+    command = strip_ansi(command)
+    # Strip null bytes
+    command = command.replace('\x00', '')
+    # Normalize Unicode (fullwidth Latin, halfwidth Katakana, etc.)
+    command = unicodedata.normalize('NFKC', command)
+    return command
+
+
 def detect_dangerous_command(command: str) -> tuple:
     """Check if a command matches any dangerous patterns.
 
     Returns:
         (is_dangerous, pattern_key, description) or (False, None, None)
     """
-    command_lower = command.lower()
+    command_lower = _normalize_command_for_detection(command).lower()
     for pattern, description in DANGEROUS_PATTERNS:
         if re.search(pattern, command_lower, re.IGNORECASE | re.DOTALL):
             pattern_key = description
@@ -277,12 +299,28 @@ def prompt_dangerous_approval(command: str, description: str,
         sys.stdout.flush()
 
 
+def _normalize_approval_mode(mode) -> str:
+    """Normalize approval mode values loaded from YAML/config.
+
+    YAML 1.1 treats bare words like `off` as booleans, so a config entry like
+    `approvals:\n  mode: off` is parsed as False unless quoted. Treat that as the
+    intended string mode instead of falling back to manual approvals.
+    """
+    if isinstance(mode, bool):
+        return "off" if mode is False else "manual"
+    if isinstance(mode, str):
+        normalized = mode.strip().lower()
+        return normalized or "manual"
+    return "manual"
+
+
 def _get_approval_mode() -> str:
     """Read the approval mode from config. Returns 'manual', 'smart', or 'off'."""
     try:
         from hermes_cli.config import load_config
         config = load_config()
-        return config.get("approvals", {}).get("mode", "manual")
+        mode = config.get("approvals", {}).get("mode", "manual")
+        return _normalize_approval_mode(mode)
     except Exception:
         return "manual"
 

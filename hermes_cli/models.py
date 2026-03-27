@@ -31,19 +31,20 @@ OPENROUTER_MODELS: list[tuple[str, str]] = [
     ("anthropic/claude-haiku-4.5",      ""),
     ("openai/gpt-5.4",                  ""),
     ("openai/gpt-5.4-mini",             ""),
-    ("openrouter/hunter-alpha",          "free"),
-    ("openrouter/healer-alpha",          "free"),
+    ("xiaomi/mimo-v2-pro",               ""),
     ("openai/gpt-5.3-codex",            ""),
     ("google/gemini-3-pro-preview",     ""),
     ("google/gemini-3-flash-preview",   ""),
     ("qwen/qwen3.5-plus-02-15",         ""),
     ("qwen/qwen3.5-35b-a3b",            ""),
     ("stepfun/step-3.5-flash",          ""),
+    ("minimax/minimax-m2.7",            ""),
     ("minimax/minimax-m2.5",            ""),
     ("z-ai/glm-5",                      ""),
     ("z-ai/glm-5-turbo",                ""),
     ("moonshotai/kimi-k2.5",            ""),
     ("x-ai/grok-4.20-beta",             ""),
+    ("nvidia/nemotron-3-super-120b-a12b",      ""),
     ("nvidia/nemotron-3-super-120b-a12b:free", "free"),
     ("arcee-ai/trinity-large-preview:free", "free"),
     ("openai/gpt-5.4-pro",              ""),
@@ -52,12 +53,29 @@ OPENROUTER_MODELS: list[tuple[str, str]] = [
 
 _PROVIDER_MODELS: dict[str, list[str]] = {
     "nous": [
-        "claude-opus-4-6",
-        "claude-sonnet-4-6",
-        "gpt-5.4",
-        "gemini-3-flash",
-        "gemini-3.0-pro-preview",
-        "deepseek-v3.2",
+        "anthropic/claude-opus-4.6",
+        "anthropic/claude-sonnet-4.5",
+        "anthropic/claude-haiku-4.5",
+        "openai/gpt-5.4",
+        "openai/gpt-5.4-mini",
+        "xiaomi/mimo-v2-pro",
+        "openai/gpt-5.3-codex",
+        "google/gemini-3-pro-preview",
+        "google/gemini-3-flash-preview",
+        "qwen/qwen3.5-plus-02-15",
+        "qwen/qwen3.5-35b-a3b",
+        "stepfun/step-3.5-flash",
+        "minimax/minimax-m2.7",
+        "minimax/minimax-m2.5",
+        "z-ai/glm-5",
+        "z-ai/glm-5-turbo",
+        "moonshotai/kimi-k2.5",
+        "x-ai/grok-4.20-beta",
+        "nvidia/nemotron-3-super-120b-a12b",
+        "nvidia/nemotron-3-super-120b-a12b:free",
+        "arcee-ai/trinity-large-preview:free",
+        "openai/gpt-5.4-pro",
+        "openai/gpt-5.4-nano",
     ],
     "openai-codex": [
         "gpt-5.3-codex",
@@ -86,6 +104,7 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
     ],
     "zai": [
         "glm-5",
+        "glm-5-turbo",
         "glm-4.7",
         "glm-4.5",
         "glm-4.5-flash",
@@ -150,6 +169,7 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "gemini-3.1-pro",
         "gemini-3-pro",
         "gemini-3-flash",
+        "minimax-m2.7",
         "minimax-m2.5",
         "minimax-m2.5-free",
         "minimax-m2.1",
@@ -300,12 +320,15 @@ def list_available_providers() -> list[dict[str, str]]:
         # Check if this provider has credentials available
         has_creds = False
         try:
+            from hermes_cli.auth import get_auth_status, has_usable_secret
             if pid == "custom":
-                has_creds = bool(_get_custom_base_url())
+                custom_base_url = _get_custom_base_url() or os.getenv("OPENAI_BASE_URL", "")
+                has_creds = bool(custom_base_url.strip())
+            elif pid == "openrouter":
+                has_creds = has_usable_secret(os.getenv("OPENROUTER_API_KEY", ""))
             else:
-                from hermes_cli.runtime_provider import resolve_runtime_provider
-                runtime = resolve_runtime_provider(requested=pid)
-                has_creds = bool(runtime.get("api_key"))
+                status = get_auth_status(pid)
+                has_creds = bool(status.get("logged_in") or status.get("configured"))
         except Exception:
             pass
         result.append({
@@ -340,6 +363,15 @@ def parse_model_input(raw: str, current_provider: str) -> tuple[str, str]:
         provider_part = stripped[:colon].strip().lower()
         model_part = stripped[colon + 1:].strip()
         if provider_part and model_part and provider_part in _KNOWN_PROVIDER_NAMES:
+            # Support custom:name:model triple syntax for named custom
+            # providers.  ``custom:local:qwen`` → ("custom:local", "qwen").
+            # Single colon ``custom:qwen`` → ("custom", "qwen") as before.
+            if provider_part == "custom" and ":" in model_part:
+                second_colon = model_part.find(":")
+                custom_name = model_part[:second_colon].strip()
+                actual_model = model_part[second_colon + 1:].strip()
+                if custom_name and actual_model:
+                    return (f"custom:{custom_name}", actual_model)
             return (normalize_provider(provider_part), model_part)
     return (current_provider, stripped)
 
@@ -389,6 +421,7 @@ def detect_provider_for_model(
     Returns ``None`` when no confident match is found.
 
     Priority:
+    0. Bare provider name → switch to that provider's default model
     1. Direct provider with credentials (highest)
     2. Direct provider without credentials → remap to OpenRouter slug
     3. OpenRouter catalog match
@@ -398,6 +431,21 @@ def detect_provider_for_model(
         return None
 
     name_lower = name.lower()
+
+    # --- Step 0: bare provider name typed as model ---
+    # If someone types `/model nous` or `/model anthropic`, treat it as a
+    # provider switch and pick the first model from that provider's catalog.
+    # Skip "custom" and "openrouter" — custom has no model catalog, and
+    # openrouter requires an explicit model name to be useful.
+    resolved_provider = _PROVIDER_ALIASES.get(name_lower, name_lower)
+    if resolved_provider not in {"custom", "openrouter"}:
+        default_models = _PROVIDER_MODELS.get(resolved_provider, [])
+        if (
+            resolved_provider in _PROVIDER_LABELS
+            and default_models
+            and resolved_provider != normalize_provider(current_provider)
+        ):
+            return (resolved_provider, default_models[0])
 
     # Aggregators list other providers' models — never auto-switch TO them
     _AGGREGATORS = {"nous", "openrouter"}

@@ -12,7 +12,7 @@ import asyncio
 import logging
 import os
 import re
-from typing import Dict, List, Optional, Any
+from typing import Dict, Optional, Any
 
 try:
     from slack_bolt.async_app import AsyncApp
@@ -37,8 +37,6 @@ from gateway.platforms.base import (
     SendResult,
     SUPPORTED_DOCUMENT_TYPES,
     cache_document_from_bytes,
-    cache_image_from_url,
-    cache_audio_from_url,
 )
 
 
@@ -63,6 +61,7 @@ class SlackAdapter(BasePlatformAdapter):
         self._handler: Optional[AsyncSocketModeHandler] = None
         self._bot_user_id: Optional[str] = None
         self._user_name_cache: Dict[str, str] = {}  # user_id → display name
+        self._socket_mode_task: Optional[asyncio.Task] = None
 
     async def connect(self) -> bool:
         """Connect to Slack via Socket Mode."""
@@ -97,7 +96,7 @@ class SlackAdapter(BasePlatformAdapter):
                 await self._handle_slash_command(command)
 
             self._handler = AsyncSocketModeHandler(self._app, app_token)
-            asyncio.create_task(self._handler.start_async())
+            self._socket_mode_task = asyncio.create_task(self._handler.start_async())
 
             self._running = True
             logger.info("[Slack] Connected as @%s (Socket Mode)", bot_name)
@@ -273,8 +272,4 @@ class SlackAdapter(BasePlatformAdapter):
         event = MessageEvent(text=text, message_type=MessageType.COMMAND, source=source, raw_message=command)
         await self.handle_message(event)
 
-    async def _download_slack_file_bytes(self, url: str) -> bytes:
-        import httpx
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(url, headers={"Authorization": f"Bearer {self.config.token}"})
-            return response.content
+
