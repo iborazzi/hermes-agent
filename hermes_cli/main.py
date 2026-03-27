@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Hermes CLI - Main entry point.
-
+from langchain.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
 Usage:
     hermes                     # Interactive chat (default)
     hermes chat                # Interactive chat
@@ -45,13 +45,10 @@ Usage:
 
 import argparse
 import os
-from datetime import datetime
 import subprocess
 import sys
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
-from datetime import datetime
 def get_timestamp():
     return f"[{datetime.now().strftime('%H:%M:%S')}] "
 # Add project root to path
@@ -70,7 +67,6 @@ os.environ.setdefault("MSWEA_SILENT_STARTUP", "1")
 
 import logging
 import time as _time
-from datetime import datetime
 
 from hermes_cli import __version__, __release_date__
 from hermes_constants import OPENROUTER_BASE_URL
@@ -381,9 +377,9 @@ def _session_browse_picker(sessions: list) -> Optional[str]:
         title = (s.get("title") or "").strip()
         preview = (s.get("preview") or "").strip()
         label = title or preview or s["id"]
-        import datetime; print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {i + 1:>3}. {label:<50} {last_active:<10} {src}")
-            label = label[:47] + "..."
-        last_active = _relative_time(s.get("last_active"))
+        if len(label) > 50:
+        label = label[:47] + "..."        
+	last_active = _relative_time(s.get("last_active"))
         src = s.get("source", "")[:6]
         print(f"{get_timestamp()}{i + 1:>3}. {label:<50} {last_active:<10} {src}")
 
@@ -530,6 +526,7 @@ def cmd_chat(args):
         "toolsets": args.toolsets,
         "skills": getattr(args, "skills", None),
         "verbose": args.verbose,
+	"callbacks": [StreamingStdOutCallbackHandler()] if getattr(args, "verbose", False) else [],
         "quiet": getattr(args, "quiet", False),
         "query": args.query,
         "resume": getattr(args, "resume", None),
