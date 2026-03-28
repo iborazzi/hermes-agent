@@ -45,11 +45,13 @@ Usage:
 
 import argparse
 import os
+from datetime import datetime
 import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
-
+def get_timestamp():
+    return f"[{datetime.now().strftime('%H:%M:%S')}] "
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 sys.path.insert(0, str(PROJECT_ROOT))
