@@ -677,7 +677,15 @@ class SessionStore:
 
             if session_key in self._entries and not force_new:
                 entry = self._entries[session_key]
+# ... mevcut kodlar ...
+if session_key in self._entries and not force_new:
+    entry = self._entries[session_key] # Entry burada tanımlanıyor
 
+    # ŞİMDİ BURAYA EKLE:
+    if self.config.provider == "copilot":
+        entry.base_url = "https://api.githubcopilot.com"
+        entry.api_mode = "codex_responses"
+        entry.model = self.config.model or "gpt-5.4"
                 reset_reason = self._should_reset(entry, source)
                 if not reset_reason:
                     entry.updated_at = now
