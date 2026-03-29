@@ -25,6 +25,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from hermes_constants import get_hermes_home
 from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import urlparse, urlunparse
 
@@ -32,7 +33,7 @@ import httpx
 import yaml
 
 from tools.skills_guard import (
-    ScanResult, scan_skill, should_allow_install, content_hash, TRUSTED_REPOS,
+    ScanResult, content_hash, TRUSTED_REPOS,
 )
 
 logger = logging.getLogger(__name__)
@@ -42,7 +43,7 @@ logger = logging.getLogger(__name__)
 # Paths
 # ---------------------------------------------------------------------------
 
-HERMES_HOME = Path(os.getenv("HERMES_HOME", Path.home() / ".hermes"))
+HERMES_HOME = get_hermes_home()
 SKILLS_DIR = HERMES_HOME / "skills"
 HUB_DIR = SKILLS_DIR / ".hub"
 LOCK_FILE = HUB_DIR / "lock.json"
@@ -250,6 +251,7 @@ class GitHubSource(SkillSource):
         {"repo": "openai/skills", "path": "skills/"},
         {"repo": "anthropics/skills", "path": "skills/"},
         {"repo": "VoltAgent/awesome-agent-skills", "path": "skills/"},
+        {"repo": "garrytan/gstack", "path": ""},
     ]
 
     def __init__(self, auth: GitHubAuth, extra_taps: Optional[List[Dict]] = None):
@@ -394,7 +396,8 @@ class GitHubSource(SkillSource):
             if dir_name.startswith(".") or dir_name.startswith("_"):
                 continue
 
-            skill_identifier = f"{repo}/{path.rstrip('/')}/{dir_name}"
+            prefix = path.rstrip("/")
+            skill_identifier = f"{repo}/{prefix}/{dir_name}" if prefix else f"{repo}/{dir_name}"
             meta = self.inspect(skill_identifier)
             if meta:
                 skills.append(meta)
@@ -924,19 +927,10 @@ class SkillsShSource(SkillSource):
 
     def inspect(self, identifier: str) -> Optional[SkillMeta]:
         canonical = self._normalize_identifier(identifier)
-        detail: Optional[dict] = None
-        for candidate in self._candidate_identifiers(canonical):
-            meta = self.github.inspect(candidate)
-            if meta:
-                detail = self._fetch_detail_page(canonical)
-                return self._finalize_inspect_meta(meta, canonical, detail)
-
         detail = self._fetch_detail_page(canonical)
-        resolved = self._discover_identifier(canonical, detail=detail)
-        if resolved:
-            meta = self.github.inspect(resolved)
-            if meta:
-                return self._finalize_inspect_meta(meta, canonical, detail)
+        meta = self._resolve_github_meta(canonical, detail=detail)
+        if meta:
+            return self._finalize_inspect_meta(meta, canonical, detail)
         return None
 
     def _featured_skills(self, limit: int) -> List[SkillMeta]:
@@ -1098,6 +1092,13 @@ class SkillsShSource(SkillSource):
                 if self._matches_skill_tokens(meta, tokens):
                     return meta.identifier
 
+        # Prefer a single recursive tree lookup before brute-forcing every
+        # top-level directory. This avoids large request bursts on categorized
+        # repos like borghei/claude-skills.
+        tree_result = self.github._find_skill_in_repo_tree(repo, skill_token)
+        if tree_result:
+            return tree_result
+
         # Fallback: scan repo root for directories that might contain skills
         try:
             root_url = f"https://api.github.com/repos/{repo}/contents/"
@@ -1130,14 +1131,17 @@ class SkillsShSource(SkillSource):
         except Exception:
             pass
 
-        # Final fallback: use the GitHub Trees API to find the skill anywhere
-        # in the repo tree.  This handles deeply nested structures like
-        # cli-tool/components/skills/development/<skill>/ that the shallow
-        # scan above can't reach.
-        tree_result = self.github._find_skill_in_repo_tree(repo, skill_token)
-        if tree_result:
-            return tree_result
+        return None
 
+    def _resolve_github_meta(self, identifier: str, detail: Optional[dict] = None) -> Optional[SkillMeta]:
+        for candidate in self._candidate_identifiers(identifier):
+            meta = self.github.inspect(candidate)
+            if meta:
+                return meta
+
+        resolved = self._discover_identifier(identifier, detail=detail)
+        if resolved:
+            return self.github.inspect(resolved)
         return None
 
     def _finalize_inspect_meta(self, meta: SkillMeta, canonical: str, detail: Optional[dict]) -> SkillMeta:
@@ -1263,10 +1267,15 @@ class SkillsShSource(SkillSource):
 
     @staticmethod
     def _normalize_identifier(identifier: str) -> str:
-        if identifier.startswith("skills-sh/"):
-            return identifier[len("skills-sh/"):]
-        if identifier.startswith("skills.sh/"):
-            return identifier[len("skills.sh/"):]
+        prefix_aliases = (
+            "skills-sh/",
+            "skills.sh/",
+            "skils-sh/",
+            "skils.sh/",
+        )
+        for prefix in prefix_aliases:
+            if identifier.startswith(prefix):
+                return identifier[len(prefix):]
         return identifier
 
     @staticmethod
@@ -2020,8 +2029,8 @@ class LobeHubSource(SkillSource):
             "metadata:",
             "  hermes:",
             f"    tags: [{', '.join(str(t) for t in tag_list)}]",
-            f"  lobehub:",
-            f"    source: lobehub",
+            "  lobehub:",
+            "    source: lobehub",
             "---",
         ]
 

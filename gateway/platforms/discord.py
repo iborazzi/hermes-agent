@@ -20,7 +20,7 @@ import threading
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Any
+from typing import Callable, Dict, Optional, Any
 
 logger = logging.getLogger(__name__)
 
@@ -446,6 +446,7 @@ class DiscordAdapter(BasePlatformAdapter):
         # Persistent typing indicator loops per channel (DMs don't reliably
         # show the standard typing gateway event for bots)
         self._typing_tasks: Dict[str, asyncio.Task] = {}
+        self._bot_task: Optional[asyncio.Task] = None
         # Cap to prevent unbounded growth (Discord threads get archived).
         self._MAX_TRACKED_THREADS = 500
     
@@ -549,6 +550,22 @@ class DiscordAdapter(BasePlatformAdapter):
                             return
                     # "all" falls through to handle_message
                 
+                # If the message @mentions other users but NOT the bot, the
+                # sender is talking to someone else — stay silent.  Only
+                # applies in server channels; in DMs the user is always
+                # talking to the bot (mentions are just references).
+                # Controlled by DISCORD_IGNORE_NO_MENTION (default: true).
+                _ignore_no_mention = os.getenv(
+                    "DISCORD_IGNORE_NO_MENTION", "true"
+                ).lower() in ("true", "1", "yes")
+                if _ignore_no_mention and message.mentions and not isinstance(message.channel, discord.DMChannel):
+                    _bot_mentioned = (
+                        self._client.user is not None
+                        and self._client.user in message.mentions
+                    )
+                    if not _bot_mentioned:
+                        return  # Talking to someone else, don't interrupt
+
                 await self._handle_message(message)
 
             @self._client.event
@@ -588,7 +605,7 @@ class DiscordAdapter(BasePlatformAdapter):
             self._register_slash_commands()
             
             # Start the bot in background
-            asyncio.create_task(self._client.start(self.config.token))
+            self._bot_task = asyncio.create_task(self._client.start(self.config.token))
             
             # Wait for ready
             await asyncio.wait_for(self._ready_event.wait(), timeout=30)
@@ -2094,6 +2111,11 @@ class DiscordAdapter(BasePlatformAdapter):
         event_text = message.content
         if pending_text_injection:
             event_text = f"{pending_text_injection}\n\n{event_text}" if event_text else pending_text_injection
+
+        # Defense-in-depth: prevent empty user messages from entering session
+        # (can happen when user sends @mention-only with no other text)
+        if not event_text or not event_text.strip():
+            event_text = "(The user sent a message with no text content)"
 
         event = MessageEvent(
             text=event_text,
