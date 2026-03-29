@@ -659,6 +659,7 @@ class SessionStore:
         force_new: bool = False
     ) -> SessionEntry:
         """
+       
         Get an existing session or create a new one.
 
         Evaluates reset policy to determine if the existing session is stale.
@@ -671,7 +672,10 @@ class SessionStore:
         # All _entries / _loaded mutations are protected by self._lock.
         db_end_session_id = None
         db_create_kwargs = None
-
+ # GPT-5.4'ün OpenRouter'a sapmasını engelleyen koruma
+if source.provider == "copilot":
+    entry.base_url = "https://api.github.com"
+    entry.api_mode = "copilot"
         with self._lock:
             self._ensure_loaded_locked()
 
