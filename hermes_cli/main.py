@@ -42,11 +42,17 @@ Usage:
 
     hermes claw migrate --dry-run  # Preview migration without changes
 """
-
-import argparse
+# Eğer LangChain paketlerini bulamıyorsa, hata vermemesi için boş bir sınıf tanımlayalım
+try:
+    from langchain_community.callbacks import StreamingStdOutCallbackHandler
+except (ImportError, ModuleNotFoundError):
+    class StreamingStdOutCallbackHandler:
+        def __init__(self): pass
 import os
+import argparse
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 def get_timestamp():
@@ -376,10 +382,11 @@ def _session_browse_picker(sessions: list) -> Optional[str]:
     for i, s in enumerate(sessions):
         title = (s.get("title") or "").strip()
         preview = (s.get("preview") or "").strip()
-        label = title or preview or s["id"]
+        label = s.get("label", "Untitled Session")
         if len(label) > 50:
-        label = label[:47] + "..."        
-	last_active = _relative_time(s.get("last_active"))
+            label = label[:47] + "..."
+
+        last_active = _relative_time(s.get("last_active"))
         src = s.get("source", "")[:6]
         print(f"{get_timestamp()}{i + 1:>3}. {label:<50} {last_active:<10} {src}")
 
@@ -526,7 +533,7 @@ def cmd_chat(args):
         "toolsets": args.toolsets,
         "skills": getattr(args, "skills", None),
         "verbose": args.verbose,
-	"callbacks": [StreamingStdOutCallbackHandler()] if getattr(args, "verbose", False) else [],
+    "callbacks": [StreamingStdOutCallbackHandler()] if getattr(args, "verbose", False) else [],
         "quiet": getattr(args, "quiet", False),
         "query": args.query,
         "resume": getattr(args, "resume", None),
@@ -538,7 +545,7 @@ def cmd_chat(args):
     kwargs = {k: v for k, v in kwargs.items() if v is not None}
     
     try:
-        cli_main(**kwargs)
+        cli_main(**{k: v for k, v in kwargs.items() if k != 'callbacks'})
     except ValueError as e:
         print(f"Error: {e}")
         sys.exit(1)
@@ -4024,6 +4031,12 @@ For more help on a command:
         return
     
     # Default to chat if no command specified
+    # Execute the command
+    if hasattr(args, 'func'):
+        args.func(args)
+        return  # 
+    else:
+        parser.print_help()
     if args.command is None:
         args.query = None
         args.model = None
@@ -4037,11 +4050,7 @@ For more help on a command:
         cmd_chat(args)
         return
     
-    # Execute the command
-    if hasattr(args, 'func'):
-        args.func(args)
-    else:
-        parser.print_help()
+    
 
 
 if __name__ == "__main__":
