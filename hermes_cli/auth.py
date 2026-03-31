@@ -125,15 +125,15 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         inference_base_url=DEFAULT_COPILOT_ACP_BASE_URL,
         base_url_env_var="COPILOT_ACP_BASE_URL",
     ),
-    "zai": ProviderConfig(
-        id="zai",
+    "z-ai": ProviderConfig(
+        id="z-ai",
         name="Z.AI / GLM",
-        auth_type="api_key",
-        inference_base_url="https://api.z.ai/api/paas/v4",
-        api_key_env_vars=("GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY"),
-        base_url_env_var="GLM_BASE_URL",
+        auth_type="api_key", # "oauth_device_code" DEĞİL, "api_key" olmalı!
+        inference_base_url="https://api.z.ai/v1", # GLM'in gerçek URL'si neyse o
+        api_key_env_vars=("GLM_API_KEY",),
     ),
-    "kimi-coding": ProviderConfig(
+    
+        "kimi-coding": ProviderConfig(
         id="kimi-coding",
         name="Kimi / Moonshot",
         auth_type="api_key",
