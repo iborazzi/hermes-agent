@@ -287,7 +287,28 @@ def resolve_runtime_provider(
     if custom_runtime:
         custom_runtime["requested_provider"] = requested_provider
         return custom_runtime
+# ... (mevcut diğer kontrollerin bittiği yer)
 
+    # BUG FIX #3388: Explicit Copilot seçimlerinde OpenRouter'a sapmayı engelle
+    # Eğer provider 'copilot' ise veya base_url direkt GitHub Copilot'ı işaret ediyorsa dur.
+    is_copilot = requested_provider == "copilot" or (explicit_base_url and "api.githubcopilot.com" in explicit_base_url)
+    
+    if is_copilot:
+        # Burada bir hata varsa, OpenRouter'a fallback yapmak yerine hatayı yükseltiyoruz.
+        # Bu sayede 'unsupported_api_for_model' hatası yerine gerçek sebebi görürüz.
+        raise RuntimeError(
+            f"Copilot runtime resolution failed for {requested_provider}. "
+            "Blocking fallback to OpenRouter to prevent provider drift (Bug #3388)."
+        )
+
+    # Eğer Copilot değilse, normal akışta OpenRouter'a düşebilir:
+    runtime = _resolve_openrouter_runtime(
+        requested_provider=requested_provider,
+        explicit_api_key=explicit_api_key,
+        explicit_base_url=explicit_base_url,
+    )
+    runtime["requested_provider"] = requested_provider
+    return runtime
     provider = resolve_provider(
         requested_provider,
         explicit_api_key=explicit_api_key,

@@ -4,13 +4,15 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, Literal, Optional
+import os
 
 from agent.model_metadata import fetch_endpoint_model_metadata, fetch_model_metadata
 
 DEFAULT_PRICING = {"input": 0.0, "output": 0.0}
 
 _ZERO = Decimal("0")
-_ONE_MILLION = Decimal("1000000")
+_CONTEXT_OVERRIDE = os.getenv("HERMES_MAX_CONTEXT")
+_ONE_MILLION = Decimal(_CONTEXT_OVERRIDE) if _CONTEXT_OVERRIDE else Decimal("1000000")
 
 CostStatus = Literal["actual", "estimated", "included", "unknown"]
 CostSource = Literal[
