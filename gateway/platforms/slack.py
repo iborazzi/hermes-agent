@@ -9,10 +9,12 @@ Uses slack-bolt (Python) with Socket Mode for:
 """
 
 import asyncio
+import json
 import logging
 import os
 import re
-from typing import Dict, List, Optional, Any
+import time
+from typing import Dict, Optional, Any
 
 try:
     from slack_bolt.async_app import AsyncApp
@@ -37,8 +39,6 @@ from gateway.platforms.base import (
     SendResult,
     SUPPORTED_DOCUMENT_TYPES,
     cache_document_from_bytes,
-    cache_image_from_url,
-    cache_audio_from_url,
 )
 
 
@@ -63,6 +63,16 @@ class SlackAdapter(BasePlatformAdapter):
         self._handler: Optional[AsyncSocketModeHandler] = None
         self._bot_user_id: Optional[str] = None
         self._user_name_cache: Dict[str, str] = {}  # user_id → display name
+        self._socket_mode_task: Optional[asyncio.Task] = None
+        # Multi-workspace support
+        self._team_clients: Dict[str, AsyncWebClient] = {}   # team_id → WebClient
+        self._team_bot_user_ids: Dict[str, str] = {}          # team_id → bot_user_id
+        self._channel_team: Dict[str, str] = {}                # channel_id → team_id
+        # Dedup cache: event_ts → timestamp.  Prevents duplicate bot
+        # responses when Socket Mode reconnects redeliver events.
+        self._seen_messages: Dict[str, float] = {}
+        self._SEEN_TTL = 300   # 5 minutes
+        self._SEEN_MAX = 2000  # prune threshold
 
     async def connect(self) -> bool:
         """Connect to Slack via Socket Mode."""
@@ -70,7 +80,7 @@ class SlackAdapter(BasePlatformAdapter):
             logger.error("[Slack] slack-bolt not installed. Run: pip install slack-bolt")
             return False
 
-        bot_token = self.config.token
+        raw_token = self.config.token
         app_token = os.getenv("SLACK_APP_TOKEN")
 
         if not bot_token or not app_token:
@@ -97,10 +107,13 @@ class SlackAdapter(BasePlatformAdapter):
                 await self._handle_slash_command(command)
 
             self._handler = AsyncSocketModeHandler(self._app, app_token)
-            asyncio.create_task(self._handler.start_async())
+            self._socket_mode_task = asyncio.create_task(self._handler.start_async())
 
             self._running = True
-            logger.info("[Slack] Connected as @%s (Socket Mode)", bot_name)
+            logger.info(
+                "[Slack] Socket Mode connected (%d workspace(s))",
+                len(self._team_clients),
+            )
             return True
 
         except Exception as e:
@@ -115,7 +128,24 @@ class SlackAdapter(BasePlatformAdapter):
             except Exception as e:
                 logger.warning("[Slack] Error while closing Socket Mode handler: %s", e)
         self._running = False
+
+        # Release the token lock (use stored identity, not re-read env)
+        try:
+            from gateway.status import release_scoped_lock
+            if getattr(self, '_token_lock_identity', None):
+                release_scoped_lock('slack-app-token', self._token_lock_identity)
+                self._token_lock_identity = None
+        except Exception:
+            pass
+
         logger.info("[Slack] Disconnected")
+
+    def _get_client(self, chat_id: str) -> AsyncWebClient:
+        """Return the workspace-specific WebClient for a channel."""
+        team_id = self._channel_team.get(chat_id)
+        if team_id and team_id in self._team_clients:
+            return self._team_clients[team_id]
+        return self._app.client  # fallback to primary
 
     async def send(
         self,
@@ -143,7 +173,7 @@ class SlackAdapter(BasePlatformAdapter):
                     if broadcast and i == 0:
                         kwargs["reply_broadcast"] = True
 
-                last_result = await self._app.client.chat_postMessage(**kwargs)
+                last_result = await self._get_client(chat_id).chat_postMessage(**kwargs)
 
             return SendResult(
                 success=True,
