@@ -339,6 +339,11 @@ def parse_model_input(raw: str, current_provider: str) -> tuple[str, str]:
     if colon > 0:
         provider_part = stripped[:colon].strip().lower()
         model_part = stripped[colon + 1:].strip()
+        # Duplicate check: 'write_filewrite_file' -> 'write_file'
+        half = len(model_part) // 2
+        if half > 0 and model_part[:half] == model_part[half:]:
+            model_part = model_part[:half]
+            model_part = model_part.split()[0] # İlk kelimeyi al, gerisini at
         if provider_part and model_part and provider_part in _KNOWN_PROVIDER_NAMES:
             return (normalize_provider(provider_part), model_part)
     return (current_provider, stripped)
