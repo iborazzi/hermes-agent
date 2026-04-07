@@ -1,0 +1,20 @@
+# Guide: Smart Model Failover & Reliability
+
+This guide explains how to ensure your Hermes Agent remains functional even when your primary AI provider experiences downtime or rate limits.
+
+## Introduction
+In a production-ready agent, reliability is paramount. By implementing a **Smart Failover** system, the agent can automatically detect API failures and switch to a secondary (backup) model seamlessly.
+
+## Configuration
+To enable failover, you should define a primary and a backup model in your configuration:
+
+1. **Primary Model:** Your high-performance model (e.g., Hermes-3-Llama-3.1-405B).
+2. **Backup Model:** A fast, reliable alternative (e.g., Llama-3.1-70B).
+
+## Benefits
+- **Uptime:** Scheduled cron jobs and tasks will complete even if one provider is down.
+- **Context Handling:** Automatically adjust to the backup model's context limits.
+- **Error Recovery:** Detects 429 (Rate Limit) and 500 (Server Error) status codes to trigger the switch.
+
+## Summary
+Providing a fallback mechanism is a best practice for any AI agent deployment, ensuring that your automated workflows are never interrupted by external service issues.
